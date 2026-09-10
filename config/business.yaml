@@ -1,0 +1,21 @@
+# Configuración del negocio — Generado por AgentKit
+negocio:
+  nombre: "Pets Garden Panamá"
+  descripcion: >
+    Centro integral de servicios para mascotas: grooming/peluquería, guardería,
+    hotel, adiestramiento (entrenamiento canino) y veterinaria. Atiende a dueños
+    de mascotas que buscan cuidado completo en un solo lugar.
+  horario: "Lunes a Viernes 7am a 6pm, Sábados 8am a 3pm, Domingos cerrado"
+
+agente:
+  nombre: "Pets"
+  tono: "Profesional y amigable — cercano y claro, sin dejar de ser formal"
+  casos_de_uso:
+    - "Responder preguntas frecuentes (hotel, guardería, grooming, veterinaria, entrenamiento)"
+    # Agendar citas queda para una fase siguiente, cuando el usuario lo pida.
+
+metadata:
+  creado: "2026-09-07"
+  proveedor: "meta"
+  proveedor_ia: "gemini"
+  version: "2.0"
