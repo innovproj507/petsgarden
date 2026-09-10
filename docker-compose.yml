@@ -10,4 +10,10 @@ services:
     volumes:
       - ./knowledge:/app/knowledge
       - ./config:/app/config
+      # Persiste la base SQLite fuera del contenedor. Sin esto, cada "docker compose
+      # up --build" (por ejemplo al actualizar el codigo) recrea el contenedor y borra
+      # el historial de conversaciones, porque el archivo vive dentro de su capa
+      # escribible. El archivo debe existir en el host ANTES del primer "up" (touch
+      # agentkit.db) o Docker lo crea como carpeta en vez de archivo.
+      - ./agentkit.db:/app/agentkit.db
     restart: unless-stopped

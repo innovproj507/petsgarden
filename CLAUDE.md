@@ -2128,8 +2128,20 @@ services:
     volumes:
       - ./knowledge:/app/knowledge
       - ./config:/app/config
+      # Persiste la base SQLite fuera del contenedor. Sin esto, cada "docker compose
+      # up --build" (por ejemplo al actualizar el codigo) recrea el contenedor y borra
+      # el historial de conversaciones, porque el archivo vive dentro de su capa
+      # escribible. El archivo debe existir en el host ANTES del primer "up" (touch
+      # agentkit.db) o Docker lo crea como carpeta en vez de archivo. Si el usuario usa
+      # Postgres (Railway) esto no hace nada — DATABASE_URL ya no apunta a este archivo.
+      - ./agentkit.db:/app/agentkit.db
     restart: unless-stopped
 ```
+
+Este volumen es lo que hace seguro usar SQLite en un VPS propio (a diferencia de Railway,
+cuyo disco de contenedor es efímero incluso con volúmenes de Docker Compose — ahí sí hace
+falta Postgres). En un VPS el disco es persistente, así que con este mapeo el historial
+sobrevive a rebuilds.
 
 **`.dockerignore`:**
 
