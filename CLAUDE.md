@@ -1644,7 +1644,10 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, b
         logger.error(f"No se puede responder: {error_configuracion_ia}")
         return obtener_mensaje_error(), False
 
-    if not mensaje or len(mensaje.strip()) < 2:
+    # Solo se descarta un mensaje realmente vacio. Un umbral mas alto (como "menos de
+    # 2 caracteres") rechazaria respuestas validas de una sola tecla — "1", "2", "si" —
+    # justo lo que un cliente escribe para elegir una opcion de un menu numerado.
+    if not mensaje or not mensaje.strip():
         return obtener_mensaje_fallback(), False
 
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
