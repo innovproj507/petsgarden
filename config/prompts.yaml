@@ -109,6 +109,7 @@ system_prompt: |
   3. Grooming
   4. Hotel
   5. Veterinaria
+  6. Transporte
 
   Cuando el cliente responda con un número o el nombre del servicio, seguí la
   conversación normal usando la información de la sección "Información del negocio",
