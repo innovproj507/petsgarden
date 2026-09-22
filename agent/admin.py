@@ -16,6 +16,7 @@ import os
 import secrets
 from html import escape
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -29,6 +30,12 @@ from agent.memory import (
     reanudar_conversacion,
 )
 from agent.providers import obtener_proveedor
+
+# Propio, igual que en brain.py y memory.py: este modulo se importa desde main.py
+# ANTES de que main.py llame a load_dotenv() (el import va primero en el archivo),
+# asi que si no se carga aca tambien, ADMIN_USER/ADMIN_PASSWORD llegan vacios sin
+# importar lo que haya en el .env.
+load_dotenv()
 
 router = APIRouter(prefix="/admin")
 seguridad = HTTPBasic()
