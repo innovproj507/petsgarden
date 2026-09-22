@@ -112,6 +112,17 @@ ESTILO = """
     background: #b45309; color: white; font-size: 0.7rem;
     padding: 0.15rem 0.5rem; border-radius: 999px; white-space: nowrap;
   }
+  .atencion-badge {
+    background: #dc2626; color: white; font-size: 0.7rem;
+    padding: 0.15rem 0.5rem; border-radius: 999px; white-space: nowrap;
+  }
+
+  /* Buscador */
+  .buscador-cont { padding: 0.6rem 1rem; background: white; border-bottom: 1px solid #eee; flex-shrink: 0; }
+  #buscador {
+    width: 100%; padding: 0.5rem 0.8rem; font-size: 0.95rem;
+    border: 1px solid #ddd; border-radius: 20px; font-family: inherit;
+  }
 
   /* Lista de conversaciones */
   #lista { flex: 1; overflow-y: auto; }
@@ -120,11 +131,13 @@ ESTILO = """
     padding: 0.75rem 1rem;
     background: white;
     border-bottom: 1px solid #eee;
+    border-left: 4px solid transparent;
     text-decoration: none; color: inherit;
   }
+  .conversacion.necesita-atencion { border-left-color: #dc2626; background: #fef2f2; }
   .conversacion:active { background: #f5f5f5; }
   .conversacion .info { flex: 1; min-width: 0; }
-  .conversacion .telefono { font-weight: 600; display: flex; align-items: center; gap: 0.4rem; }
+  .conversacion .telefono { font-weight: 600; display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
   .conversacion .preview {
     color: #667781; font-size: 0.88rem;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -152,6 +165,7 @@ ESTILO = """
     display: block; text-align: right; font-size: 0.68rem;
     color: #999; margin-top: 0.2rem;
   }
+  .mensaje .check { color: #53bdeb; margin-left: 0.2rem; }
 
   .barra-inferior { flex-shrink: 0; background: #f0f0f0; padding: 0.6rem; }
   .barra-inferior .estado-pausa {
@@ -222,6 +236,31 @@ function mostrarError(msg) {
   clearTimeout(_toastTimeout);
   _toastTimeout = setTimeout(() => toast.classList.remove('visible'), 3000);
 }
+
+const TITULO_BASE = document.title;
+
+// Beep corto generado con Web Audio, sin archivo de sonido. Los navegadores
+// bloquean audio hasta que hay una interaccion del usuario en la pagina (un
+// click, un tap) -- por eso el primer aviso puede no sonar; los siguientes,
+// despues de que alguien toco la pantalla una vez, si.
+function reproducirSonido() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.3);
+  } catch (e) { /* navegador sin soporte, o sin permiso todavia: no pasa nada */ }
+}
+
+function actualizarTitulo(cantidad) {
+  document.title = cantidad > 0 ? `(${cantidad}) ${TITULO_BASE}` : TITULO_BASE;
+}
 """
 
 
@@ -233,24 +272,41 @@ async def panel(usuario: str = Depends(_verificar)) -> str:
       <div class="topbar">
         <h1>{NOMBRE_NEGOCIO}<br><span class="subtitulo">Conversaciones</span></h1>
       </div>
+      <div class="buscador-cont">
+        <input type="search" id="buscador" placeholder="Buscar por número...">
+      </div>
       <div id="lista"><p class="vacio">Cargando...</p></div>
 
       <script>
         {JS_COMUN}
 
-        function renderizarLista(conversaciones) {{
+        let conversacionesActuales = [];
+        let numerosConAtencionPrevios = new Set();
+
+        function necesitaAtencion(c) {{
+          // Un humano ya tomo la conversacion (pausada) y el cliente escribio
+          // de nuevo sin que nadie del equipo le haya contestado todavia.
+          return c.pausado && c.ultimo_rol === 'user';
+        }}
+
+        function renderizarLista() {{
+          const filtro = document.getElementById('buscador').value.trim();
           const cont = document.getElementById('lista');
-          if (conversaciones.length === 0) {{
-            cont.innerHTML = '<p class="vacio">Todavía no hay conversaciones.</p>';
+          const filtradas = filtro
+            ? conversacionesActuales.filter(c => c.telefono.includes(filtro))
+            : conversacionesActuales;
+
+          if (filtradas.length === 0) {{
+            cont.innerHTML = `<p class="vacio">${{filtro ? 'Sin resultados.' : 'Todavía no hay conversaciones.'}}</p>`;
             return;
           }}
-          cont.innerHTML = conversaciones.map(c => `
-            <a class="conversacion" href="/admin/chat/${{encodeURIComponent(c.telefono)}}">
+          cont.innerHTML = filtradas.map(c => `
+            <a class="conversacion ${{necesitaAtencion(c) ? 'necesita-atencion' : ''}}" href="/admin/chat/${{encodeURIComponent(c.telefono)}}">
               <div class="avatar">🐾</div>
               <div class="info">
                 <div class="telefono">
                   ${{escaparHtml(c.telefono)}}
-                  ${{c.pausado ? '<span class="pausado-badge">⏸ persona</span>' : ''}}
+                  ${{necesitaAtencion(c) ? '<span class="atencion-badge">necesita respuesta</span>' : (c.pausado ? '<span class="pausado-badge">⏸ persona</span>' : '')}}
                 </div>
                 <div class="preview">${{escaparHtml(c.ultimo_mensaje)}}</div>
               </div>
@@ -263,11 +319,25 @@ async def panel(usuario: str = Depends(_verificar)) -> str:
           try {{
             const r = await fetch('/admin/api/conversaciones');
             if (!r.ok) throw new Error('HTTP ' + r.status);
-            renderizarLista(await r.json());
+            conversacionesActuales = await r.json();
+            renderizarLista();
+
+            const numerosConAtencion = new Set(
+              conversacionesActuales.filter(necesitaAtencion).map(c => c.telefono)
+            );
+            // Solo suena/parpadea si HAY un numero nuevo que antes no estaba
+            // en la lista de "necesita atencion" -- si no, sonaria cada 5
+            // segundos sin parar mientras algo siga pendiente.
+            const hayNuevo = [...numerosConAtencion].some(t => !numerosConAtencionPrevios.has(t));
+            if (hayNuevo) reproducirSonido();
+            numerosConAtencionPrevios = numerosConAtencion;
+            actualizarTitulo(numerosConAtencion.size);
           }} catch (e) {{
             mostrarError('Sin conexión, reintentando...');
           }}
         }}
+
+        document.getElementById('buscador').addEventListener('input', renderizarLista);
 
         actualizar();
         setInterval(actualizar, 5000);
@@ -310,7 +380,10 @@ async def chat(telefono: str, usuario: str = Depends(_verificar)) -> str:
             <div class="burbuja-fila ${{m.role}}">
               <div class="mensaje ${{m.role}}">
                 ${{escaparHtml(m.content)}}
-                <span class="hora">${{horaCorta(m.fecha)}}</span>
+                <span class="hora">
+                  ${{horaCorta(m.fecha)}}
+                  ${{m.role === 'assistant' ? '<span class="check" title="Enviado a WhatsApp">✓</span>' : ''}}
+                </span>
               </div>
             </div>
           `).join('');
@@ -397,6 +470,7 @@ async def api_conversaciones(usuario: str = Depends(_verificar)) -> list[dict]:
         {
             "telefono": c["telefono"],
             "ultimo_mensaje": c["ultimo_mensaje"],
+            "ultimo_rol": c["ultimo_rol"],
             "pausado": c["pausado"],
             "fecha": c["fecha"].isoformat(),
         }
