@@ -16,8 +16,10 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
+from agent.admin import router as admin_router
 from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
+    esta_pausado,
     guardar_mensaje,
     inicializar_db,
     liberar_evento,
@@ -85,6 +87,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AgentKit — WhatsApp AI Agent", version="2.0.0", lifespan=lifespan)
+app.include_router(admin_router)
 
 
 @app.get("/")
@@ -176,6 +179,17 @@ async def procesar_mensaje(msg: MensajeEntrante):
 
     async with _candados[msg.telefono]:
         try:
+            # Si alguien del equipo tomo esta conversacion desde /admin, el bot no
+            # responde solo — pero el mensaje del cliente igual se guarda, para que
+            # la persona lo vea en el panel.
+            if await esta_pausado(msg.telefono):
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                logger.info(
+                    f"Conversacion con {msg.telefono} pausada (la atiende una persona); "
+                    "no se responde automaticamente"
+                )
+                return
+
             # El historial se lee ANTES de guardar el mensaje actual: brain.py agrega
             # el mensaje nuevo al final, y asi no queda duplicado.
             historial = await obtener_historial(msg.telefono)

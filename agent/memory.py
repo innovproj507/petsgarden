@@ -13,7 +13,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from sqlalchemy import DateTime, Integer, String, Text, delete, select
+from sqlalchemy import DateTime, Integer, String, Text, delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -76,6 +76,19 @@ class EventoProcesado(Base):
 
     evento_id: Mapped[str] = mapped_column(String(200), primary_key=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, index=True)
+
+
+class Conversacion(Base):
+    """
+    Control humano sobre una conversacion. Si esta pausada, el bot deja de responder
+    automaticamente — lo usa el panel de /admin cuando alguien del equipo responde a
+    mano, para que el bot no le siga contestando al cliente por encima.
+    """
+
+    __tablename__ = "conversaciones"
+
+    telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
+    pausado: Mapped[bool] = mapped_column(default=False)
 
 
 async def inicializar_db():
@@ -169,3 +182,60 @@ async def limpiar_historial(telefono: str):
     async with async_session() as session:
         await session.execute(delete(Mensaje).where(Mensaje.telefono == telefono))
         await session.commit()
+
+
+async def esta_pausado(telefono: str) -> bool:
+    """True si un humano tomo esta conversacion y el bot no debe responder solo."""
+    async with async_session() as session:
+        conv = await session.get(Conversacion, telefono)
+        return bool(conv and conv.pausado)
+
+
+async def pausar_conversacion(telefono: str):
+    """Deja de responder automaticamente en esta conversacion."""
+    async with async_session() as session:
+        conv = await session.get(Conversacion, telefono)
+        if conv:
+            conv.pausado = True
+        else:
+            session.add(Conversacion(telefono=telefono, pausado=True))
+        await session.commit()
+
+
+async def reanudar_conversacion(telefono: str):
+    """El bot vuelve a responder automaticamente en esta conversacion."""
+    async with async_session() as session:
+        conv = await session.get(Conversacion, telefono)
+        if conv:
+            conv.pausado = False
+            await session.commit()
+
+
+async def listar_conversaciones() -> list[dict]:
+    """
+    Un renglon por telefono, con su ultimo mensaje y si esta pausada — para el panel
+    de /admin. Pensado para el volumen de un negocio chico, no para miles de
+    conversaciones simultaneas; si eso llega a pasar, esta consulta se puede optimizar.
+    """
+    async with async_session() as session:
+        resultado = await session.execute(
+            select(Mensaje.telefono, func.max(Mensaje.id)).group_by(Mensaje.telefono)
+        )
+        filas = resultado.all()
+
+        conversaciones = []
+        for telefono, ultimo_id in filas:
+            ultimo = await session.get(Mensaje, ultimo_id)
+            conv = await session.get(Conversacion, telefono)
+            conversaciones.append(
+                {
+                    "telefono": telefono,
+                    "ultimo_mensaje": ultimo.content,
+                    "ultimo_rol": ultimo.role,
+                    "fecha": ultimo.timestamp,
+                    "pausado": bool(conv and conv.pausado),
+                }
+            )
+
+    conversaciones.sort(key=lambda c: c["fecha"], reverse=True)
+    return conversaciones
