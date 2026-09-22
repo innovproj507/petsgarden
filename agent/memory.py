@@ -239,3 +239,26 @@ async def listar_conversaciones() -> list[dict]:
 
     conversaciones.sort(key=lambda c: c["fecha"], reverse=True)
     return conversaciones
+
+
+async def obtener_mensajes_admin(telefono: str, limite: int = 200) -> list[dict]:
+    """
+    Como obtener_historial(), pero con la hora de cada mensaje — para el panel de
+    /admin. No se reusa obtener_historial() porque ese esta pensado para el contexto
+    que recibe la IA (sin hora, sin el recorte de "empezar por un mensaje del
+    usuario") y cambiarle la forma ahi rompería brain.py.
+    """
+    async with async_session() as session:
+        resultado = await session.execute(
+            select(Mensaje)
+            .where(Mensaje.telefono == telefono)
+            .order_by(Mensaje.id.desc())
+            .limit(limite)
+        )
+        mensajes = list(resultado.scalars().all())
+
+    mensajes.reverse()
+    return [
+        {"role": m.role, "content": m.content, "fecha": m.timestamp.isoformat()}
+        for m in mensajes
+    ]
