@@ -10,6 +10,11 @@ mientras alguien del equipo la atiende.
 Protegido con usuario/contraseña (HTTP Basic Auth) via ADMIN_USER / ADMIN_PASSWORD
 en el .env. No es un sistema de usuarios — para un negocio chico con un par de
 personas atendiendo, alcanza con una sola credencial compartida.
+
+Las paginas (/admin/, /admin/chat/{telefono}) renderizan el HTML inicial y despues
+se refrescan solas contra los endpoints /admin/api/* (JSON) via fetch — sin recargar
+la pagina. El navegador ya manda la credencial de Basic Auth en cada fetch porque es
+el mismo origen y el mismo "realm", asi que no hace falta manejar tokens aparte.
 """
 
 import os
@@ -65,86 +70,252 @@ def _verificar(credenciales: HTTPBasicCredentials = Depends(seguridad)) -> str:
     return credenciales.username
 
 
+# ── Estilo: pensado para celular primero (los mensajes se leen desde ahi la
+# mayoria de las veces), con el mismo CSS sirviendo bien en laptop. ──────────
 ESTILO = """
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 1rem;
+    color: #1a1a1a;
+    background: #fafafa;
+  }
+  h1 { font-size: 1.25rem; }
   a { color: #0a7d3c; text-decoration: none; }
-  .conversacion { display: block; padding: 0.75rem; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 0.5rem; }
-  .conversacion:hover { background: #f7f7f7; }
+  .conversacion {
+    display: block;
+    padding: 0.9rem;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    margin-bottom: 0.6rem;
+    background: white;
+  }
+  .conversacion:active, .conversacion:hover { background: #f2f2f2; }
   .pausado { color: #b45309; font-weight: 600; }
-  .mensaje { padding: 0.5rem 0.75rem; border-radius: 8px; margin-bottom: 0.5rem; max-width: 80%; white-space: pre-wrap; }
-  .mensaje.user { background: #e5e7eb; }
-  .mensaje.assistant { background: #d1fae5; margin-left: auto; }
+  .vacio { color: #666; }
+  .mensajes { display: flex; flex-direction: column; gap: 0.5rem; margin: 1rem 0; }
+  .mensaje {
+    padding: 0.6rem 0.85rem;
+    border-radius: 10px;
+    max-width: 85%;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .mensaje.user { background: #e5e7eb; align-self: flex-start; }
+  .mensaje.assistant { background: #d1fae5; align-self: flex-end; }
   form { margin-top: 1rem; }
-  textarea { width: 100%; padding: 0.5rem; box-sizing: border-box; font-family: inherit; }
-  button { padding: 0.5rem 1rem; margin-top: 0.5rem; cursor: pointer; }
+  textarea {
+    width: 100%;
+    padding: 0.6rem;
+    font-family: inherit;
+    font-size: 1rem;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+  }
+  button {
+    padding: 0.7rem 1.2rem;
+    margin-top: 0.5rem;
+    font-size: 1rem;
+    border: none;
+    border-radius: 8px;
+    background: #0a7d3c;
+    color: white;
+    cursor: pointer;
+  }
+  button.secundario { background: #6b7280; }
+  button:active { opacity: 0.85; }
+  .estado { color: #666; font-size: 0.9rem; }
+  .barra { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
 </style>
+"""
+
+# JS compartido: escapa texto para no reabrir un hueco de XSS al insertar
+# contenido de clientes (nombres, mensajes) con innerHTML.
+JS_ESCAPAR = """
+function escaparHtml(texto) {
+  const d = document.createElement('div');
+  d.textContent = texto;
+  return d.innerHTML;
+}
 """
 
 
 @router.get("/", response_class=HTMLResponse)
 async def panel(usuario: str = Depends(_verificar)) -> str:
-    """Lista de conversaciones, la mas reciente primero."""
-    conversaciones = await listar_conversaciones()
-
-    if not conversaciones:
-        filas = "<p>Todavía no hay conversaciones.</p>"
-    else:
-        filas = ""
-        for c in conversaciones:
-            marca = (
-                ' <span class="pausado">⏸ atendida por una persona</span>'
-                if c["pausado"]
-                else ""
-            )
-            vista_previa = escape(c["ultimo_mensaje"][:80])
-            filas += f"""
-            <a class="conversacion" href="/admin/chat/{escape(c['telefono'])}">
-              <b>{escape(c['telefono'])}</b>{marca}<br>
-              <span style="color:#666">{vista_previa}</span>
-            </a>
-            """
-
-    return f"<html><head><title>Conversaciones</title>{ESTILO}</head><body><h1>Conversaciones</h1>{filas}</body></html>"
-
-
-@router.get("/chat/{telefono}", response_class=HTMLResponse)
-async def chat(telefono: str, usuario: str = Depends(_verificar)) -> str:
-    """Historial completo de una conversacion + formulario para responder."""
-    historial = await obtener_historial(telefono, limite=100)
-    pausado = await esta_pausado(telefono)
-
-    mensajes_html = "".join(
-        f'<div class="mensaje {m["role"]}">{escape(m["content"])}</div>' for m in historial
-    )
-    if not mensajes_html:
-        mensajes_html = "<p>Sin mensajes todavía.</p>"
-
-    boton_pausa = (
-        f'<form method="post" action="/admin/chat/{telefono}/reanudar">'
-        f"<button type=\"submit\">▶ Reanudar al bot</button></form>"
-        if pausado
-        else '<p style="color:#666">El bot sigue respondiendo automáticamente en esta conversación.</p>'
-    )
-
+    """Lista de conversaciones — se refresca sola cada 5 segundos."""
     return f"""
-    <html><head><title>{escape(telefono)}</title>{ESTILO}</head><body>
-      <p><a href="/admin/">&larr; Todas las conversaciones</a></p>
-      <h1>{escape(telefono)}</h1>
-      {mensajes_html}
-      {boton_pausa}
-      <form method="post" action="/admin/chat/{telefono}/enviar">
-        <textarea name="mensaje" rows="3" placeholder="Escribe una respuesta..." required></textarea>
-        <button type="submit">Enviar (pausa al bot)</button>
-      </form>
+    <html><head><title>Conversaciones</title>{ESTILO}</head><body>
+      <div class="barra">
+        <h1>Conversaciones</h1>
+        <span class="estado" id="estado"></span>
+      </div>
+      <div id="lista"><p class="vacio">Cargando...</p></div>
+
+      <script>
+        {JS_ESCAPAR}
+
+        function renderizarLista(conversaciones) {{
+          const cont = document.getElementById('lista');
+          if (conversaciones.length === 0) {{
+            cont.innerHTML = '<p class="vacio">Todavía no hay conversaciones.</p>';
+            return;
+          }}
+          cont.innerHTML = conversaciones.map(c => `
+            <a class="conversacion" href="/admin/chat/${{encodeURIComponent(c.telefono)}}">
+              <b>${{escaparHtml(c.telefono)}}</b>
+              ${{c.pausado ? ' <span class="pausado">⏸ atendida por una persona</span>' : ''}}
+              <br><span style="color:#666">${{escaparHtml(c.ultimo_mensaje.slice(0, 80))}}</span>
+            </a>
+          `).join('');
+        }}
+
+        async function actualizar() {{
+          try {{
+            const r = await fetch('/admin/api/conversaciones');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            renderizarLista(await r.json());
+            document.getElementById('estado').textContent = '';
+          }} catch (e) {{
+            document.getElementById('estado').textContent = 'Sin conexión, reintentando...';
+          }}
+        }}
+
+        actualizar();
+        setInterval(actualizar, 5000);
+      </script>
     </body></html>
     """
 
 
-@router.post("/chat/{telefono}/enviar")
-async def enviar(
+@router.get("/chat/{telefono}", response_class=HTMLResponse)
+async def chat(telefono: str, usuario: str = Depends(_verificar)) -> str:
+    """Historial de una conversacion — se refresca sola y se puede responder sin recargar."""
+    return f"""
+    <html><head><title>{escape(telefono)}</title>{ESTILO}</head><body>
+      <p><a href="/admin/">&larr; Todas las conversaciones</a></p>
+      <div class="barra">
+        <h1>{escape(telefono)}</h1>
+        <span class="estado" id="estado"></span>
+      </div>
+      <div class="mensajes" id="mensajes"><p class="vacio">Cargando...</p></div>
+      <div id="controlPausa"></div>
+      <form id="formEnviar">
+        <textarea name="mensaje" rows="3" placeholder="Escribe una respuesta..." required></textarea>
+        <button type="submit">Enviar (pausa al bot)</button>
+      </form>
+
+      <script>
+        {JS_ESCAPAR}
+        const TELEFONO = {telefono!r};
+        let ultimaCantidad = -1;
+
+        function renderizarMensajes(mensajes) {{
+          const cont = document.getElementById('mensajes');
+          if (mensajes.length === 0) {{
+            cont.innerHTML = '<p class="vacio">Sin mensajes todavía.</p>';
+            return;
+          }}
+          cont.innerHTML = mensajes.map(m =>
+            `<div class="mensaje ${{m.role}}">${{escaparHtml(m.content)}}</div>`
+          ).join('');
+        }}
+
+        function renderizarControlPausa(pausado) {{
+          const cont = document.getElementById('controlPausa');
+          cont.innerHTML = pausado
+            ? '<button type="button" class="secundario" id="btnReanudar">▶ Reanudar al bot</button>'
+            : '<p class="estado">El bot sigue respondiendo automáticamente en esta conversación.</p>';
+          if (pausado) {{
+            document.getElementById('btnReanudar').addEventListener('click', reanudar);
+          }}
+        }}
+
+        async function actualizar() {{
+          try {{
+            const r = await fetch(`/admin/api/chat/${{encodeURIComponent(TELEFONO)}}`);
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const datos = await r.json();
+            // Solo se vuelve a pintar si cambio algo, para no perder el scroll
+            // ni el foco del textarea mientras alguien esta escribiendo.
+            if (datos.mensajes.length !== ultimaCantidad) {{
+              renderizarMensajes(datos.mensajes);
+              ultimaCantidad = datos.mensajes.length;
+            }}
+            renderizarControlPausa(datos.pausado);
+            document.getElementById('estado').textContent = '';
+          }} catch (e) {{
+            document.getElementById('estado').textContent = 'Sin conexión, reintentando...';
+          }}
+        }}
+
+        async function reanudar() {{
+          await fetch(`/admin/api/chat/${{encodeURIComponent(TELEFONO)}}/reanudar`, {{ method: 'POST' }});
+          actualizar();
+        }}
+
+        document.getElementById('formEnviar').addEventListener('submit', async (ev) => {{
+          ev.preventDefault();
+          const textarea = ev.target.mensaje;
+          const mensaje = textarea.value.trim();
+          if (!mensaje) return;
+          const boton = ev.target.querySelector('button');
+          boton.disabled = true;
+          try {{
+            const r = await fetch(`/admin/api/chat/${{encodeURIComponent(TELEFONO)}}/enviar`, {{
+              method: 'POST',
+              headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
+              body: 'mensaje=' + encodeURIComponent(mensaje),
+            }});
+            if (!r.ok) throw new Error((await r.json()).detail || ('HTTP ' + r.status));
+            textarea.value = '';
+            ultimaCantidad = -1;  // fuerza a repintar aunque la cantidad no calce todavia
+            await actualizar();
+          }} catch (e) {{
+            alert('No se pudo enviar: ' + e.message);
+          }} finally {{
+            boton.disabled = false;
+          }}
+        }});
+
+        actualizar();
+        setInterval(actualizar, 4000);
+      </script>
+    </body></html>
+    """
+
+
+# ── API (JSON) — la usan las paginas de arriba via fetch ─────────────────────
+
+
+@router.get("/api/conversaciones")
+async def api_conversaciones(usuario: str = Depends(_verificar)) -> list[dict]:
+    conversaciones = await listar_conversaciones()
+    return [
+        {
+            "telefono": c["telefono"],
+            "ultimo_mensaje": c["ultimo_mensaje"],
+            "pausado": c["pausado"],
+        }
+        for c in conversaciones
+    ]
+
+
+@router.get("/api/chat/{telefono}")
+async def api_chat(telefono: str, usuario: str = Depends(_verificar)) -> dict:
+    return {
+        "mensajes": await obtener_historial(telefono, limite=100),
+        "pausado": await esta_pausado(telefono),
+    }
+
+
+@router.post("/api/chat/{telefono}/enviar")
+async def api_enviar(
     telefono: str, mensaje: str = Form(...), usuario: str = Depends(_verificar)
-) -> RedirectResponse:
+) -> dict:
     """
     Envia un mensaje manual y pausa la conversacion — si no la pausamos, el bot le
     seguiria respondiendo al mismo cliente por encima de lo que acaba de escribir
@@ -161,11 +332,29 @@ async def enviar(
 
     await guardar_mensaje(telefono, "assistant", mensaje)
     await pausar_conversacion(telefono)
+    return {"ok": True}
+
+
+@router.post("/api/chat/{telefono}/reanudar")
+async def api_reanudar(telefono: str, usuario: str = Depends(_verificar)) -> dict:
+    await reanudar_conversacion(telefono)
+    return {"ok": True}
+
+
+# ── Rutas viejas sin JS, por si alguien entra con un navegador muy limitado o
+# JS deshabilitado — redirigen a las paginas normales de arriba, que ya cubren
+# el mismo formulario sin depender de fetch para el primer envio. ────────────
+
+
+@router.post("/chat/{telefono}/enviar")
+async def enviar_sin_js(
+    telefono: str, mensaje: str = Form(...), usuario: str = Depends(_verificar)
+) -> RedirectResponse:
+    await api_enviar(telefono, mensaje, usuario)
     return RedirectResponse(url=f"/admin/chat/{telefono}", status_code=303)
 
 
 @router.post("/chat/{telefono}/reanudar")
-async def reanudar(telefono: str, usuario: str = Depends(_verificar)) -> RedirectResponse:
-    """Vuelve a dejar que el bot responda automaticamente en esta conversacion."""
-    await reanudar_conversacion(telefono)
+async def reanudar_sin_js(telefono: str, usuario: str = Depends(_verificar)) -> RedirectResponse:
+    await api_reanudar(telefono, usuario)
     return RedirectResponse(url=f"/admin/chat/{telefono}", status_code=303)

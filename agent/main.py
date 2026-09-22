@@ -47,6 +47,17 @@ logger.setLevel(logging.DEBUG if ENVIRONMENT == "development" else logging.INFO)
 
 PORT = int(os.getenv("PORT", "8000"))
 
+# Numero de WhatsApp del equipo. Se le avisa cuando el bot no supo responder o
+# cuando un cliente completa los datos de una cotizacion/cita — Meta Cloud API
+# directo no trae ninguna bandeja de mensajes para humanos (ver /admin), asi que
+# esto es lo que reemplaza la notificacion.
+STAFF_WHATSAPP = os.getenv("STAFF_WHATSAPP", "")
+if not STAFF_WHATSAPP:
+    logger.warning(
+        "STAFF_WHATSAPP no esta configurado: nadie va a recibir el aviso cuando el "
+        "bot necesite ayuda humana."
+    )
+
 # Un candado por numero de telefono. En WhatsApp es normal que alguien mande "hola" y
 # medio segundo despues la pregunta de verdad: sin esto los dos mensajes se procesarian
 # en paralelo, los dos leerian el mismo historial y las escrituras quedarian intercaladas.
@@ -168,6 +179,27 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
     return {"status": "ok", "encolados": encolados}
 
 
+async def avisar_al_equipo(telefono_cliente: str, mensaje_cliente: str, respuesta: str):
+    """
+    Le manda un WhatsApp a STAFF_WHATSAPP cuando una conversacion necesita que una
+    persona la revise: el bot no supo responder, o el cliente completo los datos de
+    una cotizacion o cita (ver MARCA_SEGUIMIENTO en brain.py).
+    """
+    if not STAFF_WHATSAPP:
+        logger.warning(f"No se pudo avisar por {telefono_cliente}: falta STAFF_WHATSAPP")
+        return
+
+    aviso = (
+        "🔔 Seguimiento en Pets Garden\n\n"
+        f"Cliente: {telefono_cliente}\n"
+        f"Mensaje: {mensaje_cliente}\n\n"
+        f"El bot respondio: {respuesta}"
+    )
+    enviado = await proveedor.enviar_mensaje(STAFF_WHATSAPP, aviso)
+    if not enviado:
+        logger.error(f"No se pudo enviar el aviso de seguimiento (cliente {telefono_cliente})")
+
+
 async def procesar_mensaje(msg: MensajeEntrante):
     """
     Genera la respuesta y la manda de vuelta. Corre fuera del ciclo del webhook.
@@ -193,7 +225,9 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # El historial se lee ANTES de guardar el mensaje actual: brain.py agrega
             # el mensaje nuevo al final, y asi no queda duplicado.
             historial = await obtener_historial(msg.telefono)
-            respuesta, es_respuesta_real = await generar_respuesta(msg.texto, historial)
+            respuesta, es_respuesta_real, necesita_seguimiento = await generar_respuesta(
+                msg.texto, historial
+            )
 
             enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
 
@@ -212,6 +246,9 @@ async def procesar_mensaje(msg: MensajeEntrante):
             if es_respuesta_real:
                 await guardar_mensaje(msg.telefono, "user", msg.texto)
                 await guardar_mensaje(msg.telefono, "assistant", respuesta)
+
+            if necesita_seguimiento:
+                await avisar_al_equipo(msg.telefono, msg.texto, respuesta)
 
             logger.info(f"Respuesta enviada a {msg.telefono}: {respuesta}")
 

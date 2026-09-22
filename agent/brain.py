@@ -62,7 +62,14 @@ def obtener_mensaje_fallback() -> str:
     )
 
 
-async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, bool]:
+# El system prompt le pide a la IA que agregue esto al final de su respuesta cuando
+# el equipo necesita enterarse (no supo responder, o el cliente completo los datos de
+# una cotizacion/cita). Se recorta antes de mandarle el mensaje al cliente — es una
+# señal interna, no algo que el cliente deba ver.
+MARCA_SEGUIMIENTO = "[[NECESITA_SEGUIMIENTO]]"
+
+
+async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, bool, bool]:
     """
     Genera una respuesta con el proveedor de IA configurado (Claude o Gemini).
 
@@ -71,22 +78,26 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, b
         historial: los mensajes anteriores, [{"role": "user"|"assistant", "content": "..."}]
 
     Returns:
-        (texto, es_respuesta_real)
+        (texto, es_respuesta_real, necesita_seguimiento)
 
         "es_respuesta_real" es False cuando lo que se devuelve es un aviso tecnico
         (error o fallback) y no una respuesta del agente. main.py lo usa para no
         guardar esos avisos en el historial: si se guardaran, quedarian contaminando
         el contexto de todos los mensajes siguientes.
+
+        "necesita_seguimiento" es True cuando main.py debe avisarle al equipo por
+        WhatsApp (ver STAFF_WHATSAPP) — el bot no supo responder, o el cliente acaba
+        de completar los datos de una cotizacion o cita.
     """
     if proveedor_ia is None:
         logger.error(f"No se puede responder: {error_configuracion_ia}")
-        return obtener_mensaje_error(), False
+        return obtener_mensaje_error(), False, False
 
     # Solo se descarta un mensaje realmente vacio. Un umbral mas alto (como "menos de
     # 2 caracteres") rechazaria respuestas validas de una sola tecla — "1", "2", "si" —
     # justo lo que un cliente escribe para elegir una opcion de un menu numerado.
     if not mensaje or not mensaje.strip():
-        return obtener_mensaje_fallback(), False
+        return obtener_mensaje_fallback(), False, False
 
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
     mensajes.append({"role": "user", "content": mensaje})
@@ -95,7 +106,7 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, b
     texto, info = await proveedor_ia.generar(system_prompt, mensajes)
 
     if info.get("error"):
-        return obtener_mensaje_error(), False
+        return obtener_mensaje_error(), False, False
 
     if info.get("cortado"):
         logger.warning(
@@ -106,10 +117,15 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, b
 
     if not texto:
         logger.warning("El proveedor de IA devolvio una respuesta sin texto")
-        return obtener_mensaje_fallback(), False
+        return obtener_mensaje_fallback(), False, False
+
+    necesita_seguimiento = MARCA_SEGUIMIENTO in texto
+    if necesita_seguimiento:
+        texto = texto.replace(MARCA_SEGUIMIENTO, "").strip()
 
     logger.info(
         f"Respuesta generada ({info.get('input_tokens', 0)} in / "
         f"{info.get('output_tokens', 0)} out)"
+        + (" [necesita seguimiento]" if necesita_seguimiento else "")
     )
-    return texto, True
+    return texto, True, necesita_seguimiento

@@ -64,8 +64,10 @@ async def main():
         historial = await obtener_historial(TELEFONO_TEST)
 
         print("\nAgente: ", end="", flush=True)
-        respuesta, es_respuesta_real = await generar_respuesta(mensaje, historial)
+        respuesta, es_respuesta_real, necesita_seguimiento = await generar_respuesta(mensaje, historial)
         print(respuesta)
+        if necesita_seguimiento:
+            print("[Esto le avisaria al equipo por WhatsApp en produccion]")
         print()
 
         # Igual que en produccion: los avisos tecnicos no entran al historial
