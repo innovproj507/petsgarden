@@ -7,9 +7,13 @@ para humanos. Este panel es lo que la reemplaza: lee el historial que ya guarda
 memory.py y deja responder manualmente, pausando al bot para esa conversacion
 mientras alguien del equipo la atiende.
 
-Protegido con usuario/contraseña (HTTP Basic Auth) via ADMIN_USER / ADMIN_PASSWORD
-en el .env. No es un sistema de usuarios — para un negocio chico con un par de
-personas atendiendo, alcanza con una sola credencial compartida.
+El acceso es con usuario/contraseña (ADMIN_USER / ADMIN_PASSWORD en el .env) via una
+pantalla de login propia — no el cuadro nativo del navegador (HTTP Basic Auth): se ve
+feo y, mas importante, no deja la sesion abierta de forma confiable. En su lugar, al
+iniciar sesion se guarda una cookie firmada por un token aleatorio que vive en memoria
+del proceso; dura 30 dias o hasta que alguien cierre sesion. No es un sistema de
+usuarios — para un negocio chico con un par de personas atendiendo, alcanza con una
+sola credencial compartida.
 """
 
 import os
@@ -17,9 +21,9 @@ import secrets
 from html import escape
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from starlette.status import HTTP_303_SEE_OTHER
 
 from agent.memory import (
     esta_pausado,
@@ -38,33 +42,33 @@ from agent.providers import obtener_proveedor
 load_dotenv()
 
 router = APIRouter(prefix="/admin")
-seguridad = HTTPBasic()
 
 ADMIN_USER = os.getenv("ADMIN_USER", "")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+# "secure" en la cookie exige HTTPS -- en local (development) no hay HTTPS, asi que
+# se desactiva ahi; en produccion siempre debe ir en True.
+ES_PRODUCCION = os.getenv("ENVIRONMENT", "development") == "production"
 
 NOMBRE_NEGOCIO = "Pets Garden"
+COOKIE_SESION = "admin_session"
+DURACION_SESION_SEGUNDOS = 60 * 60 * 24 * 30  # 30 dias
+
+# Tokens de sesion validos. Vive en memoria del proceso -- un reinicio del servicio
+# (deploy, reboot) cierra todas las sesiones y hay que volver a entrar, lo cual es
+# aceptable para un panel de un par de personas. No es una base de datos porque no
+# hace falta que sobreviva un reinicio: es mas simple sin una.
+SESIONES_VALIDAS: set[str] = set()
 
 
-def _verificar(credenciales: HTTPBasicCredentials = Depends(seguridad)) -> str:
-    """
-    Compara usuario y contraseña con secrets.compare_digest (a prueba de timing
-    attacks) — mismo criterio que las firmas de webhook en providers/.
-    """
-    if not ADMIN_USER or not ADMIN_PASSWORD:
-        raise HTTPException(
-            status_code=503,
-            detail="ADMIN_USER / ADMIN_PASSWORD no configurados en el .env",
-        )
-    usuario_ok = secrets.compare_digest(credenciales.username, ADMIN_USER)
-    clave_ok = secrets.compare_digest(credenciales.password, ADMIN_PASSWORD)
-    if not (usuario_ok and clave_ok):
-        raise HTTPException(
-            status_code=401,
-            detail="Usuario o contraseña incorrectos",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credenciales.username
+def _sesion_valida(request: Request) -> bool:
+    token = request.cookies.get(COOKIE_SESION)
+    return bool(token and token in SESIONES_VALIDAS)
+
+
+def _requiere_sesion_api(request: Request) -> None:
+    """Para los endpoints JSON (/admin/api/*): 401 si no hay sesion valida."""
+    if not _sesion_valida(request):
+        raise HTTPException(status_code=401, detail="Sesión expirada, inicia sesión de nuevo")
 
 
 # ── Estilo: imita la paleta de WhatsApp (el equipo ya la reconoce de memoria) y
@@ -194,6 +198,31 @@ ESTILO = """
     font-size: 0.8rem; opacity: 0; transition: opacity 0.3s; pointer-events: none;
   }
   .toast.visible { opacity: 1; }
+
+  /* Login */
+  .login-cont {
+    flex: 1; display: flex; align-items: center; justify-content: center; padding: 1rem;
+  }
+  .login-tarjeta {
+    background: white; border-radius: 12px; padding: 2rem 1.75rem;
+    max-width: 320px; width: 100%; box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+    text-align: center;
+  }
+  .login-tarjeta .avatar { margin: 0 auto 1rem; font-size: 1.5rem; }
+  .login-tarjeta h1 { font-size: 1.15rem; margin: 0 0 1.25rem; color: #1a1a1a; }
+  .login-tarjeta input {
+    width: 100%; padding: 0.65rem 0.85rem; margin-bottom: 0.75rem;
+    border: 1px solid #ddd; border-radius: 8px; font-size: 1rem; font-family: inherit;
+  }
+  .login-tarjeta button {
+    width: 100%; padding: 0.7rem; border: none; border-radius: 8px;
+    background: var(--verde-oscuro); color: white; font-size: 1rem; cursor: pointer;
+  }
+  .login-error {
+    background: #fef2f2; color: #b91c1c; padding: 0.5rem; border-radius: 8px;
+    font-size: 0.85rem; margin-bottom: 0.75rem;
+  }
+  .cerrar-sesion { color: white; opacity: 0.85; font-size: 0.8rem; text-decoration: none; }
 </style>
 """
 
@@ -264,13 +293,71 @@ function actualizarTitulo(cantidad) {
 """
 
 
-@router.get("/", response_class=HTMLResponse)
-async def panel(usuario: str = Depends(_verificar)) -> str:
-    """Lista de conversaciones — se refresca sola cada 5 segundos."""
+@router.get("/login", response_class=HTMLResponse)
+async def login_form(error: str | None = None) -> str:
+    """Pantalla de login propia, en vez del cuadro nativo del navegador."""
+    aviso = '<div class="login-error">Usuario o contraseña incorrectos.</div>' if error else ""
     return f"""
+    <html><head><title>{NOMBRE_NEGOCIO} — Entrar</title>{ESTILO}</head><body>
+      <div class="login-cont">
+        <form class="login-tarjeta" method="post" action="/admin/login">
+          <div class="avatar" style="margin:0 auto 1rem">🐾</div>
+          <h1>{NOMBRE_NEGOCIO}</h1>
+          {aviso}
+          <input type="text" name="usuario" placeholder="Usuario" autocomplete="username" required autofocus>
+          <input type="password" name="password" placeholder="Contraseña" autocomplete="current-password" required>
+          <button type="submit">Entrar</button>
+        </form>
+      </div>
+    </body></html>
+    """
+
+
+@router.post("/login")
+async def login(usuario: str = Form(...), password: str = Form(...)) -> RedirectResponse:
+    """Verifica usuario/contraseña y, si coinciden, abre una sesion de 30 dias."""
+    credenciales_ok = (
+        ADMIN_USER
+        and ADMIN_PASSWORD
+        and secrets.compare_digest(usuario, ADMIN_USER)
+        and secrets.compare_digest(password, ADMIN_PASSWORD)
+    )
+    if not credenciales_ok:
+        return RedirectResponse("/admin/login?error=1", status_code=HTTP_303_SEE_OTHER)
+
+    token = secrets.token_urlsafe(32)
+    SESIONES_VALIDAS.add(token)
+    respuesta = RedirectResponse("/admin/", status_code=HTTP_303_SEE_OTHER)
+    respuesta.set_cookie(
+        COOKIE_SESION,
+        token,
+        max_age=DURACION_SESION_SEGUNDOS,
+        httponly=True,
+        secure=ES_PRODUCCION,
+        samesite="lax",
+    )
+    return respuesta
+
+
+@router.get("/logout")
+async def logout(request: Request) -> RedirectResponse:
+    """Cierra la sesion actual (no las de otros dispositivos que hayan iniciado sesion)."""
+    SESIONES_VALIDAS.discard(request.cookies.get(COOKIE_SESION))
+    respuesta = RedirectResponse("/admin/login", status_code=HTTP_303_SEE_OTHER)
+    respuesta.delete_cookie(COOKIE_SESION)
+    return respuesta
+
+
+@router.get("/", response_class=HTMLResponse)
+async def panel(request: Request):
+    """Lista de conversaciones — se refresca sola cada 5 segundos."""
+    if not _sesion_valida(request):
+        return RedirectResponse("/admin/login", status_code=HTTP_303_SEE_OTHER)
+    return HTMLResponse(f"""
     <html><head><title>{NOMBRE_NEGOCIO} — Conversaciones</title>{ESTILO}</head><body>
       <div class="topbar">
         <h1>{NOMBRE_NEGOCIO}<br><span class="subtitulo">Conversaciones</span></h1>
+        <a class="cerrar-sesion" href="/admin/logout">Salir</a>
       </div>
       <div class="buscador-cont">
         <input type="search" id="buscador" placeholder="Buscar por número...">
@@ -318,6 +405,7 @@ async def panel(usuario: str = Depends(_verificar)) -> str:
         async function actualizar() {{
           try {{
             const r = await fetch('/admin/api/conversaciones');
+            if (r.status === 401) {{ window.location.href = '/admin/login'; return; }}
             if (!r.ok) throw new Error('HTTP ' + r.status);
             conversacionesActuales = await r.json();
             renderizarLista();
@@ -343,13 +431,15 @@ async def panel(usuario: str = Depends(_verificar)) -> str:
         setInterval(actualizar, 5000);
       </script>
     </body></html>
-    """
+    """)
 
 
 @router.get("/chat/{telefono}", response_class=HTMLResponse)
-async def chat(telefono: str, usuario: str = Depends(_verificar)) -> str:
+async def chat(telefono: str, request: Request):
     """Historial de una conversacion — se refresca sola y se puede responder sin recargar."""
-    return f"""
+    if not _sesion_valida(request):
+        return RedirectResponse("/admin/login", status_code=HTTP_303_SEE_OTHER)
+    return HTMLResponse(f"""
     <html><head><title>{escape(telefono)}</title>{ESTILO}</head><body>
       <div class="topbar">
         <a href="/admin/">&larr;</a>
@@ -403,6 +493,7 @@ async def chat(telefono: str, usuario: str = Depends(_verificar)) -> str:
         async function actualizar() {{
           try {{
             const r = await fetch(`/admin/api/chat/${{encodeURIComponent(TELEFONO)}}`);
+            if (r.status === 401) {{ window.location.href = '/admin/login'; return; }}
             if (!r.ok) throw new Error('HTTP ' + r.status);
             const datos = await r.json();
             // Solo se vuelve a pintar si cambio algo, para no perder el scroll
@@ -457,14 +548,14 @@ async def chat(telefono: str, usuario: str = Depends(_verificar)) -> str:
         setInterval(actualizar, 4000);
       </script>
     </body></html>
-    """
+    """)
 
 
 # ── API (JSON) — la usan las paginas de arriba via fetch ─────────────────────
 
 
 @router.get("/api/conversaciones")
-async def api_conversaciones(usuario: str = Depends(_verificar)) -> list[dict]:
+async def api_conversaciones(_: None = Depends(_requiere_sesion_api)) -> list[dict]:
     conversaciones = await listar_conversaciones()
     return [
         {
@@ -479,7 +570,7 @@ async def api_conversaciones(usuario: str = Depends(_verificar)) -> list[dict]:
 
 
 @router.get("/api/chat/{telefono}")
-async def api_chat(telefono: str, usuario: str = Depends(_verificar)) -> dict:
+async def api_chat(telefono: str, _: None = Depends(_requiere_sesion_api)) -> dict:
     return {
         "mensajes": await obtener_mensajes_admin(telefono, limite=100),
         "pausado": await esta_pausado(telefono),
@@ -488,7 +579,7 @@ async def api_chat(telefono: str, usuario: str = Depends(_verificar)) -> dict:
 
 @router.post("/api/chat/{telefono}/enviar")
 async def api_enviar(
-    telefono: str, mensaje: str = Form(...), usuario: str = Depends(_verificar)
+    telefono: str, mensaje: str = Form(...), _: None = Depends(_requiere_sesion_api)
 ) -> dict:
     """
     Envia un mensaje manual y pausa la conversacion — si no la pausamos, el bot le
@@ -510,7 +601,7 @@ async def api_enviar(
 
 
 @router.post("/api/chat/{telefono}/reanudar")
-async def api_reanudar(telefono: str, usuario: str = Depends(_verificar)) -> dict:
+async def api_reanudar(telefono: str, _: None = Depends(_requiere_sesion_api)) -> dict:
     await reanudar_conversacion(telefono)
     return {"ok": True}
 
@@ -522,13 +613,13 @@ async def api_reanudar(telefono: str, usuario: str = Depends(_verificar)) -> dic
 
 @router.post("/chat/{telefono}/enviar")
 async def enviar_sin_js(
-    telefono: str, mensaje: str = Form(...), usuario: str = Depends(_verificar)
+    telefono: str, mensaje: str = Form(...), _: None = Depends(_requiere_sesion_api)
 ) -> RedirectResponse:
-    await api_enviar(telefono, mensaje, usuario)
+    await api_enviar(telefono, mensaje, _)
     return RedirectResponse(url=f"/admin/chat/{telefono}", status_code=303)
 
 
 @router.post("/chat/{telefono}/reanudar")
-async def reanudar_sin_js(telefono: str, usuario: str = Depends(_verificar)) -> RedirectResponse:
-    await api_reanudar(telefono, usuario)
+async def reanudar_sin_js(telefono: str, _: None = Depends(_requiere_sesion_api)) -> RedirectResponse:
+    await api_reanudar(telefono, _)
     return RedirectResponse(url=f"/admin/chat/{telefono}", status_code=303)

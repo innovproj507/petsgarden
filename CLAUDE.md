@@ -211,14 +211,21 @@ plantillas, números, catálogo y estadísticas.
 
 Si el usuario con Meta directo pide poder ver los mensajes o responder manualmente,
 la solución no es buscar más en el panel de Meta — hay que construir un mini panel propio:
-un router (`agent/admin.py`) protegido con `ADMIN_USER`/`ADMIN_PASSWORD` (HTTP Basic Auth,
-comparado con `secrets.compare_digest`) que lea `memory.py` para listar conversaciones y
-responder, más una tabla nueva (`Conversacion`, con un campo `pausado`) para que cuando un
-humano responda a mano, el bot deje de contestarle automáticamente al mismo cliente por
-encima — si no, se pisan las respuestas. `procesar_mensaje()` en `main.py` chequea esa
-pausa antes de llamar a `generar_respuesta()`, pero igual guarda el mensaje del cliente
-para que aparezca en el panel. No lo generes por default — es para cuando el usuario lo
-pide, y solo aplica a Meta directo (Zernio no lo necesita).
+un router (`agent/admin.py`) con login propio — una pantalla con usuario/contraseña
+(`ADMIN_USER`/`ADMIN_PASSWORD`, comparados con `secrets.compare_digest`) que arma una
+sesión: un token aleatorio (`secrets.token_urlsafe`) guardado en un `set` en memoria del
+proceso y mandado al navegador en una cookie `httponly` de 30 días. **No uses
+`fastapi.security.HTTPBasic`** — el cuadro nativo del navegador que genera es feo y no
+dejaba la sesión abierta de forma confiable; es justo lo primero que un usuario real pidió
+cambiar. El panel lee `memory.py` para listar conversaciones y responder, más una tabla
+nueva (`Conversacion`, con un campo `pausado`) para que cuando un humano responda a mano,
+el bot deje de contestarle automáticamente al mismo cliente por encima — si no, se pisan
+las respuestas. `procesar_mensaje()` en `main.py` chequea esa pausa antes de llamar a
+`generar_respuesta()`, pero igual guarda el mensaje del cliente para que aparezca en el
+panel. El diseño conviene que imite la paleta de WhatsApp (verde `#25D366`/`#128C7E`,
+burbujas estilo chat) — es lo que el equipo va a reconocer de inmediato. No lo generes
+por default — es para cuando el usuario lo pide, y solo aplica a Meta directo (Zernio no
+lo necesita).
 
 ---
 
